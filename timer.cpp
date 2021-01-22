@@ -129,7 +129,7 @@ struct Timer::Queue : guard::EnableConditionNotification {
     }
 
     bool addTask(std::shared_ptr<DelayedTask> task) {
-        if (_maxQueueSize <= _queue.size())
+        if (_quit || _maxQueueSize <= _queue.size())
             return false;
         auto position = _queue.emplace(task->dueTime(), std::move(task));
         if (position == _queue.begin())
@@ -137,10 +137,16 @@ struct Timer::Queue : guard::EnableConditionNotification {
         return true;
     }
 
+    void cancelAll() {
+        for (auto &[_, task] : _queue) {
+            task->cancel();
+        }
+    }
+
 private:
     bool taskIsReady() {
         auto now = std::chrono::steady_clock::now();
-        return nearestTask().value_or(now) < now;
+        return nearestTask().value_or(TimePoint::max()) <= now;
     }
 
     std::optional<TimePoint> nearestTask() const {
@@ -165,6 +171,7 @@ struct Timer::Self {
     ~Self() {
         _queue.accessTo().object().stop();
         _dispatcher.join();
+        _queue.accessTo().object().cancelAll();
     }
 
     Handle addTask(std::shared_ptr<DelayedTask> task) {

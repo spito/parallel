@@ -61,7 +61,8 @@ private:
                 _state = State::CANCELLED;
                 return true;
             }
-            waitForNotification([&]{ return _state != State::BUSY; });
+            if (_executor != std::this_thread::get_id())
+                waitForNotification([&]{ return _state != State::BUSY; });
             return false;
         }
 
@@ -69,6 +70,7 @@ private:
             if (_state != State::WAITING)
                 return false;
             _state = State::BUSY;
+            _executor = std::this_thread::get_id();
             return true;
         }
 
@@ -89,6 +91,7 @@ private:
 
     private:
         State _state;
+        std::thread::id _executor;
         std::exception_ptr _exception;
     };
 

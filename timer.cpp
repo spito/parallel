@@ -114,16 +114,16 @@ struct Timer::Queue : guard::EnableConditionNotification {
 
     std::shared_ptr<DelayedTask> getTask() {
         while (!_quit) {
-            if (auto point = nearestTask())
-                waitForNotification(point.value(), [&]{ return _quit || taskIsReady(); });
-            else
-                waitForNotification([&] { return _quit || nearestTask(); });
-
             if (taskIsReady()) {
                 auto task = _queue.begin()->second;
                 _queue.erase(_queue.begin());
                 return task;
             }
+
+            if (auto point = nearestTask())
+                waitForNotification(point.value(), [&]{ return _quit || taskIsReady(); });
+            else
+                waitForNotification([&] { return _quit || nearestTask(); });
         }
         return {};
     }

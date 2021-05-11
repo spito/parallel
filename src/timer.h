@@ -2,6 +2,7 @@
 #define PARALLEL_TIMER_H
 
 #include <chrono>
+#include <optional>
 
 #include "thread_pool.h"
 
@@ -11,15 +12,6 @@ struct Timer {
 
     using Task = ThreadPool::Task;
     using TimePoint = std::chrono::steady_clock::time_point;
-
-    enum class State {
-        WAITING,
-        BUSY,
-        FINISHED,
-        CANCELLED,
-        FAILED_TO_SCHEDULE,
-        EXCEPTION,
-    };
 
     struct DelayedTask;
     struct Queue;
@@ -42,7 +34,14 @@ struct Timer {
         }
 
         bool cancel();
-        State getState() const;
+        bool restart();
+
+        bool isCancelled() const;
+        bool isDone() const;
+        bool isRunning() const;
+        bool isWaiting() const;
+
+        std::chrono::milliseconds delay() const;
 
     private:
         std::shared_ptr<DelayedTask> _task;
@@ -54,6 +53,11 @@ struct Timer {
     Handle addDelayedTask(std::chrono::milliseconds duration, Task task);
 
 private:
+    friend struct Manipulator;
+
+    bool start(std::shared_ptr<DelayedTask>);
+    bool reschedule(std::shared_ptr<DelayedTask>);
+
     struct Self;
     std::unique_ptr<Self> _self;
 };

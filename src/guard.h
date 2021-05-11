@@ -24,16 +24,16 @@
  *          1) Use accessTo method to obtain proxy
  * 
  *              parallel::guard::Shared<Object> smth;
- *              smth.accessTo().object().someMethod();
+ *              smth.lock()->someMethod();
  * 
- *              auto proxy = smth.constAccessTo();
- *              proxy.object().constMethod1();
- *              proxy.object().constMethod2();
+ *              auto proxy = smth.constLock();
+ *              proxy->constMethod1();
+ *              proxy->constMethod2();
  * 
  *          2) Pass a functor to the access method
  * 
  *              parallel::guard::Exclusive<Object> smth;
- *              smth.access([&](auto &object) {
+ *              smth.lock([&](auto &object) {
  *                  object.someMethod();
  *              });
  * 
@@ -59,12 +59,13 @@ namespace detail {
  * @tparam Lock Mutex ownership RAII wrapper
  */
 template<
-    typename ObjectReference,
+    typename Object,
     typename Lock
 >
 struct Proxy {
 
-    static_assert(std::is_reference_v<ObjectReference>);
+    using ObjectReference = std::add_lvalue_reference_t<Object>;
+    using ObjectPtr = std::add_pointer_t<Object>;
 
     /**
      * @brief Construct a new Proxy object
@@ -85,13 +86,29 @@ struct Proxy {
 
     Proxy &operator=(Proxy) = delete;
 
+    ObjectReference get() {
+        return _ref;
+    }
+
+    std::add_const_t<ObjectReference> get() const {
+        return _ref;
+    }
+
+    ObjectReference operator*() {
+        return _ref;
+    }
+
+    std::add_const_t<ObjectReference> operator*() const {
+        return _ref;
+    }
+
     /**
      * @brief Access to the guarded object.
      * 
      * @return ObjectRef
      */
-    ObjectReference object() {
-        return _ref;
+    ObjectPtr operator->() {
+        return &_ref;
     }
 
     /**
@@ -99,8 +116,8 @@ struct Proxy {
      * 
      * @return std::add_const_t<ObjectReference> 
      */
-    std::add_const_t<ObjectReference> object() const {
-        return *_ref;
+    std::add_const_t<ObjectPtr> operator->() const {
+        return &_ref;
     }
 
 private:
@@ -176,6 +193,33 @@ private:
     std::condition_variable_any _cv;
 };
 
+template<typename Object, typename = void>
+struct IsSignalable : std::false_type {};
+
+template<typename Object>
+struct IsSignalable<
+    Object,
+    std::enable_if_t<std::is_base_of_v<EnableConditionNotification, Object>>
+> : std::true_type
+{
+    static auto &access(Object &object) {
+        return object;
+    }
+};
+
+template<typename Object>
+struct IsSignalable<
+    Object,
+    std::enable_if_t<std::is_base_of_v<EnableConditionNotification, std::decay_t<decltype(*std::declval<Object>())>>>
+> : std::true_type
+{
+    static auto &access(Object &object) {
+        return *object;
+    }
+};
+
+template<typename Object>
+constexpr const bool isSignalable = IsSignalable<Object>::value;
 
 /**
  * @brief Guard for any object in parallel environment.
@@ -192,7 +236,7 @@ template<
     typename Mutex,
     template<typename> class WriteLockTemplate,
     template<typename> class ReadLockTemplate = WriteLockTemplate,
-    bool notSignalable = !std::is_base_of_v<EnableConditionNotification, Object>
+    bool notSignalable = !isSignalable<Object>
 >
 struct alignas(hardware_destructive_interference_size) Guard {
 
@@ -203,7 +247,7 @@ struct alignas(hardware_destructive_interference_size) Guard {
     using ReadLock = ReadLockTemplate<Mutex>;
 
     static_assert(!std::is_reference_v<Object>);
-    static_assert(!std::is_base_of_v<EnableConditionNotification, Object>);
+    static_assert(!isSignalable<Object>);
 
     /**
      * @brief Construct a new guarded @p Object
@@ -235,7 +279,7 @@ struct alignas(hardware_destructive_interference_size) Guard {
      * @return Whatever @p f returns
      */
     template<typename F, typename = std::enable_if_t<isInvocable<F>>>
-    auto access(F f) {
+    auto lock(F f) {
         WriteLock _(_mutex);
         return f(_object);
     }
@@ -248,7 +292,7 @@ struct alignas(hardware_destructive_interference_size) Guard {
      * @return Whatever @p f returns
      */
     template<typename F, typename = std::enable_if_t<isInvocable<F>>>
-    auto access(F f) const {
+    auto lock(F f) const {
         ReadLock _(_mutex);
         return f(_object);
     }
@@ -261,7 +305,7 @@ struct alignas(hardware_destructive_interference_size) Guard {
      * @return Whatever @p f returns
      */
     template<typename F, typename = std::enable_if_t<isInvocable<F>>>
-    auto constAccess(F f) const {
+    auto constLock(F f) const {
         ReadLock _(_mutex);
         return f(_object);
     }
@@ -273,7 +317,7 @@ struct alignas(hardware_destructive_interference_size) Guard {
      * 
      * @return Proxy<Object &, WriteLock>
      */
-    Proxy<Object &, WriteLock> accessTo() {
+    Proxy<Object, WriteLock> lock() {
         return {_object, WriteLock(_mutex)};
     }
 
@@ -284,7 +328,7 @@ struct alignas(hardware_destructive_interference_size) Guard {
      * 
      * @return Proxy<const Object &, WriteLock>
      */
-    Proxy<const Object &, ReadLock> accessTo() const {
+    Proxy<const Object, ReadLock> lock() const {
         return {_object, ReadLock(_mutex)};
     }
 
@@ -295,7 +339,7 @@ struct alignas(hardware_destructive_interference_size) Guard {
      * 
      * @return Proxy<const Object &, WriteLock>
      */
-    Proxy<const Object &, ReadLock> constAccessTo() const {
+    Proxy<const Object, ReadLock> constLock() const {
         return {_object, ReadLock(_mutex)};
     }
 
@@ -396,8 +440,8 @@ struct alignas(hardware_destructive_interference_size) Guard<Object, Mutex, Lock
      * @return Whatever @p f returns
      */
     template<typename F, typename = std::enable_if_t<isInvocable<F>>>
-    auto access(F f) {
-        SignalableLock _(_mutex, _object);
+    auto lock(F f) {
+        SignalableLock _(_mutex, IsSignalable<Object>::access(_object));
         return f(_object);
     }
 
@@ -409,7 +453,7 @@ struct alignas(hardware_destructive_interference_size) Guard<Object, Mutex, Lock
      * @return Whatever @p f returns
      */
     template<typename F, typename = std::enable_if_t<isInvocable<F>>>
-    auto access(F f) const {
+    auto lock(F f) const {
         SignalableLock _(_mutex);
         return f(_object);
     }
@@ -422,7 +466,7 @@ struct alignas(hardware_destructive_interference_size) Guard<Object, Mutex, Lock
      * @return Whatever @p f returns
      */
     template<typename F, typename = std::enable_if_t<isInvocable<F>>>
-    auto constAccess(F f) const {
+    auto constLock(F f) const {
         SignalableLock _(_mutex);
         return f(_object);
     }
@@ -434,8 +478,8 @@ struct alignas(hardware_destructive_interference_size) Guard<Object, Mutex, Lock
      * 
      * @return Proxy<Object &, WriteLock>
      */
-    Proxy<Object &, SignalableLock> accessTo() {
-        return {_object, SignalableLock(_mutex, _object)};
+    Proxy<Object, SignalableLock> lock() {
+        return {_object, SignalableLock(_mutex,  IsSignalable<Object>::access(_object))};
     }
 
     /**
@@ -445,7 +489,7 @@ struct alignas(hardware_destructive_interference_size) Guard<Object, Mutex, Lock
      * 
      * @return Proxy<const Object &, WriteLock>
      */
-    Proxy<const Object &, SignalableLock> accessTo() const {
+    Proxy<const Object, SignalableLock> lock() const {
         return {_object, _mutex};
     }
 
@@ -456,10 +500,14 @@ struct alignas(hardware_destructive_interference_size) Guard<Object, Mutex, Lock
      * 
      * @return Proxy<const Object &, WriteLock>
      */
-    Proxy<const Object &, SignalableLock> constAccessTo() const {
+    Proxy<const Object, SignalableLock> constLock() const {
         return {_object, _mutex};
     }
 
+    /**
+     * @brief Notify one thread waiting on conditional variable. No lock are 
+     * 
+     */
     void notifyOne() {
         getSignalable().notifyOne();
     }
@@ -469,12 +517,11 @@ struct alignas(hardware_destructive_interference_size) Guard<Object, Mutex, Lock
     }
 
 private:
-
     template<typename F, typename... Guards>
     friend auto lockAll(F f, Guards &&... guards);
 
     EnableConditionNotification &getSignalable() {
-        return _object;
+        return IsSignalable<Object>::access(_object);
     }
 
     Object _object;
@@ -510,10 +557,6 @@ void Guard<Object, Mutex, WriteLockTemplate, ReadLockTemplate, notSignalable>::s
         swap(lhs, rhs);
     }, *this, other);
 }
-
-
-
-
 
 /**
  * @brief Implements `std::lock_guard` with atmost @p Duration @p Units time of waiting before
@@ -603,7 +646,7 @@ using Shared = detail::Guard<Object, std::shared_mutex, std::unique_lock, std::s
 
 /**
  * @brief Guard with exclusive recursive access to the @p Object . Timeout for waiting for mutex is 3 seconds.
- *      This class **should** not be used unless the architecture is 
+ *        This class **should** not be used unless the architecture has poor design.
  * 
  * @tparam Object object
  */

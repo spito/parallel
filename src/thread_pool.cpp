@@ -49,8 +49,8 @@ private:
 
 struct SimpleThreadPool : ThreadPool {
 
-    SimpleThreadPool(unsigned threadCount, ExceptionHandler *handler)
-        : _handler(handler)
+    SimpleThreadPool(unsigned threadCount, ExceptionHandler handler)
+        : _handler(std::move(handler))
     {
         _workers.reserve(threadCount);
         for (unsigned i = 0; i != threadCount; ++i)
@@ -58,18 +58,18 @@ struct SimpleThreadPool : ThreadPool {
     }
 
     ~SimpleThreadPool() {
-        _queue.accessTo().object().stop();
+        _queue.lock()->stop();
         for (auto &thread : _workers)
             thread.join();
     }
 
     bool addTask(Task task) override {
-        return _queue.accessTo().object().addTask(std::move(task));
+        return _queue.lock()->addTask(std::move(task));
     }
 
 private:
     void run() noexcept {
-        while (Task task = _queue.accessTo().object().getTask()) {
+        while (Task task = _queue.lock()->getTask()) {
             try {
                 task();
             } catch (...) {
@@ -80,14 +80,14 @@ private:
         }
     }
 
-    ExceptionHandler *_handler;
+    const ExceptionHandler _handler;
     std::vector<std::thread> _workers;
     guard::Exclusive<TaskQueue> _queue;
 };
 
 
-std::unique_ptr<ThreadPool> ThreadPool::createSimple(unsigned threadCount, ExceptionHandler *handler) {
-    return std::make_unique<SimpleThreadPool>(threadCount, handler);
+std::unique_ptr<ThreadPool> ThreadPool::createSimple(unsigned threadCount, ExceptionHandler handler) {
+    return std::make_unique<SimpleThreadPool>(threadCount, std::move(handler));
 }
 
 

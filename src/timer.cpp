@@ -1,4 +1,5 @@
 #include "guard.h"
+#include "state.h"
 #include "timer.h"
 
 #include <map>
@@ -9,75 +10,30 @@
 
 namespace parallel {
 
-struct Timer::DelayedTask : std::enable_shared_from_this<DelayedTask> {
 
-    DelayedTask(std::chrono::milliseconds delay, Task task, Timer &timer)
-        : _delay(delay)
-        , _task(std::move(task))
-        , _timer(&timer)
-    {}
+class Timer::DelayedTask : public std::enable_shared_from_this<DelayedTask> {
 
-    TimePoint dueTime() const {
-        return std::chrono::steady_clock::now() + _delay;
-    }
-
-    std::chrono::milliseconds delay() const {
-        return _delay;
-    }
-
-    bool cancel() {
-        return state()->cancel(*this);
-    }
-
-    bool restart() {
-        return state()->restart(*this);
-    }
-
-    void run() {
-        auto s = state();
-        if (s->run(*this)) {
-            try {
-                _task();
-                s->done(*this);
-            } catch (...) {
-                s->exception(*this, std::current_exception());
-            }
-            _state.notifyAll();
-        }
-    }
-
-    bool isWaiting() const {
-        return state()->isWaiting();
-    }
-    bool isDone() const {
-        return state()->isDone();
-    }
-    bool isRunning() const {
-        return state()->isRunning();
-    }
-    bool isCancelled() const {
-        return state()->isCancelled();
-    }
-
-private:
     struct State : guard::EnableConditionNotification {
+        using Request = state::Request<State>;
+
+        State(DelayedTask &task)
+            : _task(task)
+        {}
         virtual ~State() = default;
-        virtual bool run(DelayedTask &) {
-            return false;
+        virtual Request run() {
+            return {false, {}};
         }
-        virtual bool cancel(DelayedTask &) {
-            return false;
+        virtual Request cancel(const std::shared_ptr<State> &) {
+            return {false, {}};
         }
-        virtual bool done(DelayedTask &) {
-            return false;
+        virtual Request done() {
+            return {false, {}};
         }
-        virtual bool exception(DelayedTask &, std::exception_ptr) {
-            return false;
+        virtual Request exception(std::exception_ptr) {
+            return {false, {}};
         }
-        virtual bool restart(DelayedTask &task) {
-            if (!task.exchangeState<StateWaiting>(this))
-                return false;
-            return task.start();
+        virtual Request restart() {
+            return {false, {}};
         }
 
         virtual bool isWaiting() const {
@@ -92,17 +48,77 @@ private:
         virtual bool isCancelled() const {
             return false;
         }
+
+    protected:
+        DelayedTask &task() {
+            return _task;
+        }
+
+    private:
+        DelayedTask &_task;
     };
 
+public:
+    DelayedTask(std::chrono::milliseconds delay, Task task, Timer &timer)
+        : _state(state::Init<StateWaiting>(), *this)
+        , _delay(delay)
+        , _task(std::move(task))
+        , _timer(&timer)
+    {}
+
+    TimePoint dueTime() const {
+        return std::chrono::steady_clock::now() + _delay;
+    }
+
+    std::chrono::milliseconds delay() const {
+        return _delay;
+    }
+
+    bool cancel() {
+        return _state.call<&State::cancel>();
+    }
+
+    bool restart() {
+        return _state.call<&State::restart>();
+    }
+
+    void run() {
+        if (_state.call<&State::run>()) {
+            try {
+                _task();
+                _state.call<&State::done>();
+            } catch (...) {
+                _state.call<&State::exception>(std::current_exception());
+            }
+            _state.notifyAll();
+        }
+    }
+
+    bool isWaiting() const {
+        return _state.call<&State::isWaiting>();
+    }
+    bool isDone() const {
+        return _state.call<&State::isDone>();
+    }
+    bool isRunning() const {
+        return _state.call<&State::isRunning>();
+    }
+    bool isCancelled() const {
+        return _state.call<&State::isCancelled>();
+    }
+
+private:
     struct StateWaiting : State {
-        bool run(DelayedTask &task) override {
-            return task.exchangeState<StateRunning>(this);
+        using State::State;
+        Request run() override {
+            return {true, [&]{ return std::make_shared<StateRunning>(task()); }};
         }
-        bool cancel(DelayedTask &task) override {
-            return task.exchangeState<StateCancelled>(this);
+        Request cancel(const std::shared_ptr<State> &) override {
+            return {true, [&]{ return std::make_shared<StateCancelled>(task()); }};
         }
-        bool restart(DelayedTask &task) override {
-            return task.reschedule();
+        Request restart() override {
+            task().reschedule();
+            return {true, {}};
         }
 
         bool isWaiting() const override {
@@ -111,42 +127,52 @@ private:
     };
 
     struct StateRunning : State {
-        StateRunning()
-            : _executor(std::this_thread::get_id())
+        StateRunning(DelayedTask &task)
+            : State(task)
+            , _executor(std::this_thread::get_id())
             , _restartWanted(false)
         {}
-        bool cancel(DelayedTask &task) override {
-            if (_executor != std::this_thread::get_id())
-                waitForNotification([&] { return task.state().get() != this; });
-            return false;
-        }
-        bool done(DelayedTask &task) override {
-            if (!_restartWanted)
-                return task.exchangeState<StateDone>(this);
 
-            if (!task.exchangeState<StateWaiting>(this))
-                return false;
-            return task.restart();
+        Request cancel(const std::shared_ptr<State> &shared) override {
+            if (_executor == std::this_thread::get_id()) {
+                return {true, [&]{ return std::make_shared<StateCancelled>(task()); }};
+            }
+            waitForNotification([&] { return shared.get() != this; });
+            return {false, {}};
         }
-        bool exception(DelayedTask &task, std::exception_ptr ptr) override {
-            return task.exchangeState<StateException>(this, ptr);
+
+        Request done() override {
+            if (_restartWanted) {
+                if (task().start())
+                    return {true, [&]{ return std::make_shared<StateWaiting>(task()); }};
+                return {false, {}};
+            }
+            return {true, [&]{ return std::make_shared<StateDone>(task()); }};
         }
-        bool restart(DelayedTask &task) {
+
+        Request exception(std::exception_ptr ptr) override {
+            return {true, [&,ptr]{ return std::make_shared<StateException>(task(), ptr); }};
+        }
+
+        Request restart() {
             _restartWanted = true;
-            return true;
+            return {true, {}};
         }
 
         bool isRunning() const override {
             return true;
         }
+
     private:
         std::thread::id _executor;
         bool _restartWanted;
     };
 
     struct StateDone : State {
-        bool cancel(DelayedTask &) override {
-            return false;
+        using State::State;
+
+        Request cancel(const std::shared_ptr<State> &) override {
+            return {true, [&]{ return std::make_shared<StateCancelled>(task()); }};
         }
 
         bool isDone() const override {
@@ -155,10 +181,15 @@ private:
     };
 
     struct StateException : State {
-        StateException(std::exception_ptr ptr)
-            : _ptr(ptr)
+        StateException(DelayedTask &task, std::exception_ptr ptr)
+            : State(task)
+            , _ptr(ptr)
         {}
-        bool restart(DelayedTask &) override {
+
+        Request cancel(const std::shared_ptr<State> &) override {
+            std::rethrow_exception(_ptr);
+        }
+        Request restart() override {
             std::rethrow_exception(_ptr);
         }
 
@@ -171,26 +202,12 @@ private:
     };
 
     struct StateCancelled : State {
-        bool restart(DelayedTask &) override {
-            return false;
-        }
+        using State::State;
+
         bool isCancelled() const override {
             return true;
         }
     };
-
-    template<typename NewState, typename... Args>
-    bool exchangeState(const State *old, Args &&... args) {
-        return _state.lock([&](auto &state) {
-            if (state.get() != old)
-                return false;
-            state = std::make_shared<NewState>(std::forward<Args>(args)...);
-            return true;
-        });
-    }
-    std::shared_ptr<State> state() const {
-        return *_state.lock();
-    }
 
     bool reschedule() {
         return _timer->reschedule(shared_from_this());
@@ -200,7 +217,7 @@ private:
         return _timer->start(shared_from_this());
     }
 
-    guard::Exclusive<std::shared_ptr<State>> _state;
+    state::State<State> _state;
     const std::chrono::milliseconds _delay;
     const Task _task;
     Timer * const _timer;

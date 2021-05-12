@@ -51,80 +51,6 @@
 namespace parallel::guard {
 namespace detail {
 
-/**
- * @brief Proxy to the object. The Proxy is responsible for the locking and unlocking
- *      of the mutex using @p Lock strategy.
- * 
- * @tparam ObjectReference Reference to the wrapped object
- * @tparam Lock Mutex ownership RAII wrapper
- */
-template<
-    typename Object,
-    typename Lock
->
-struct Proxy {
-
-    using ObjectReference = std::add_lvalue_reference_t<Object>;
-    using ObjectPtr = std::add_pointer_t<Object>;
-
-    /**
-     * @brief Construct a new Proxy object
-     * 
-     * @param ref A reference to the guarded object
-     * @param lock A RAII wrapper
-     */
-    Proxy(ObjectReference ref, Lock &&lock)
-        : _ref(ref)
-        , _lock(std::move(lock))
-    {}
-
-    Proxy(const Proxy &) = delete;
-    Proxy(Proxy &&other)
-        : _ref(other.ref)
-        , _lock(std::move(other._lock))
-    {}
-
-    Proxy &operator=(Proxy) = delete;
-
-    ObjectReference get() {
-        return _ref;
-    }
-
-    std::add_const_t<ObjectReference> get() const {
-        return _ref;
-    }
-
-    ObjectReference operator*() {
-        return _ref;
-    }
-
-    std::add_const_t<ObjectReference> operator*() const {
-        return _ref;
-    }
-
-    /**
-     * @brief Access to the guarded object.
-     * 
-     * @return ObjectRef
-     */
-    ObjectPtr operator->() {
-        return &_ref;
-    }
-
-    /**
-     * @brief Constant access to the guarded object.
-     * 
-     * @return std::add_const_t<ObjectReference> 
-     */
-    std::add_const_t<ObjectPtr> operator->() const {
-        return &_ref;
-    }
-
-private:
-    ObjectReference _ref;
-    Lock _lock;
-};
-
 struct SignalableLock {
     virtual ~SignalableLock() = default;
     virtual void lock() = 0;
@@ -194,32 +120,152 @@ private:
 };
 
 template<typename Object, typename = void>
-struct IsSignalable : std::false_type {};
+struct Traits {
+    static constexpr const bool isNotifiable = false;
+    using Handle = std::add_lvalue_reference_t<Object>;
+    using Reference = std::add_lvalue_reference_t<Object>;
+    using Pointer = std::add_pointer_t<Object>;
+    using ConstReference = std::add_const_t<Reference>;
+    using ConstPointer = std::add_const_t<Pointer>;
 
-template<typename Object>
-struct IsSignalable<
-    Object,
-    std::enable_if_t<std::is_base_of_v<EnableConditionNotification, Object>>
-> : std::true_type
-{
-    static auto &access(Object &object) {
+    static Handle move(Handle handle) {
+        return handle;
+    }
+
+    template<typename H>
+    static H &access(H &object) {
         return object;
     }
 };
 
 template<typename Object>
-struct IsSignalable<
+struct Traits<
     Object,
-    std::enable_if_t<std::is_base_of_v<EnableConditionNotification, std::decay_t<decltype(*std::declval<Object>())>>>
-> : std::true_type
-{
-    static auto &access(Object &object) {
+    std::enable_if_t<std::is_base_of_v<EnableConditionNotification, Object>>
+> {
+    static constexpr const bool isNotifiable = false;
+    using Handle = std::add_lvalue_reference_t<Object>;
+    using ConstHandle = std::add_const_t<Handle>;
+    using Reference = std::add_lvalue_reference_t<Object>;
+    using Pointer = std::add_pointer_t<Object>;
+    using ConstReference = std::add_const_t<Reference>;
+    using ConstPointer = std::add_const_t<Pointer>;
+
+    static Handle move(Handle handle) {
+        return handle;
+    }
+
+    template<typename H>
+    static H &access(H &object) {
+        return object;
+    }
+};
+
+template<typename Object>
+struct Traits<
+    std::shared_ptr<Object>,
+    std::enable_if_t<std::is_base_of_v<EnableConditionNotification, Object>>
+> {
+    static constexpr const bool isNotifiable = true;
+    using Handle = std::shared_ptr<Object>;
+    using Reference = std::add_lvalue_reference_t<Object>;
+    using Pointer = std::add_pointer_t<Object>;
+    using ConstReference = std::add_const_t<Reference>;
+    using ConstPointer = std::add_const_t<Pointer>;
+
+    static Handle &&move(Handle &handle) {
+        return handle;
+    }
+    static Handle &&move(Handle &&handle) {
+        return handle;
+    }
+
+    static Reference access(Handle &object) {
+        return *object;
+    }
+    static ConstReference access(const Handle &object) {
         return *object;
     }
 };
 
 template<typename Object>
-constexpr const bool isSignalable = IsSignalable<Object>::value;
+constexpr const bool isNotifiable = Traits<Object>::isNotifiable;
+/**
+ * @brief Proxy to the object. The Proxy is responsible for the locking and unlocking
+ *      of the mutex using @p Lock strategy.
+ * 
+ * @tparam ObjectReference Reference to the wrapped object
+ * @tparam Lock Mutex ownership RAII wrapper
+ */
+template<
+    typename Object,
+    typename Lock
+>
+struct Proxy {
+
+    using Handle = typename Traits<Object>::Handle;
+    using Reference = typename Traits<Object>::Reference;
+    using ConstReference = typename Traits<Object>::ConstReference;
+    using Pointer = typename Traits<Object>::Pointer;
+    using ConstPointer = typename Traits<Object>::ConstPointer;
+
+    /**
+     * @brief Construct a new Proxy object
+     * 
+     * @param ref A reference to the guarded object
+     * @param lock A RAII wrapper
+     */
+    Proxy(Handle handle, Lock &&lock)
+        : _handle(handle)
+        , _lock(std::move(lock))
+    {}
+
+    Proxy(const Proxy &) = delete;
+    Proxy(Proxy &&other)
+        : _handle(Traits<Object>::move(other._handle))
+        , _lock(std::move(other._lock))
+    {}
+
+    Proxy &operator=(Proxy) = delete;
+
+    Reference get() {
+        return Traits<Object>::access(_handle);
+    }
+
+    ConstReference get() const {
+        return Traits<Object>::access(_handle);
+    }
+
+    Reference operator*() {
+        return Traits<Object>::access(_handle);
+    }
+
+    ConstReference operator*() const {
+        return Traits<Object>::access(_handle);
+    }
+
+    /**
+     * @brief Access to the guarded object.
+     * 
+     * @return ObjectRef
+     */
+    Pointer operator->() {
+        return &Traits<Object>::access(_handle);
+    }
+
+    /**
+     * @brief Constant access to the guarded object.
+     * 
+     * @return std::add_const_t<ObjectReference> 
+     */
+    ConstPointer operator->() const {
+        return &Traits<Object>::access(_handle);
+    }
+
+private:
+    Handle _handle;
+    Lock _lock;
+};
 
 /**
  * @brief Guard for any object in parallel environment.
@@ -229,14 +275,14 @@ constexpr const bool isSignalable = IsSignalable<Object>::value;
  * @tparam WriteLockTemplate Write/exclusive lock guard template (i.e. std::lock_guard).
  * @tparam ReadLockTemplate Read/shared lock guard template (applicable only to const access to the object).
  *      Defaults to @p WriteLockTemplate if not present.
- * @tparam signalable 
+ * @tparam notifiable 
  */
 template<
     typename Object,
     typename Mutex,
     template<typename> class WriteLockTemplate,
     template<typename> class ReadLockTemplate = WriteLockTemplate,
-    bool notSignalable = !isSignalable<Object>
+    bool notSignalable = !isNotifiable<Object>
 >
 struct alignas(hardware_destructive_interference_size) Guard {
 
@@ -247,7 +293,7 @@ struct alignas(hardware_destructive_interference_size) Guard {
     using ReadLock = ReadLockTemplate<Mutex>;
 
     static_assert(!std::is_reference_v<Object>);
-    static_assert(!isSignalable<Object>);
+    static_assert(!isNotifiable<Object>);
 
     /**
      * @brief Construct a new guarded @p Object
@@ -441,7 +487,7 @@ struct alignas(hardware_destructive_interference_size) Guard<Object, Mutex, Lock
      */
     template<typename F, typename = std::enable_if_t<isInvocable<F>>>
     auto lock(F f) {
-        SignalableLock _(_mutex, IsSignalable<Object>::access(_object));
+        SignalableLock _(_mutex, Traits<Object>::access(_object));
         return f(_object);
     }
 
@@ -479,7 +525,7 @@ struct alignas(hardware_destructive_interference_size) Guard<Object, Mutex, Lock
      * @return Proxy<Object &, WriteLock>
      */
     Proxy<Object, SignalableLock> lock() {
-        return {_object, SignalableLock(_mutex,  IsSignalable<Object>::access(_object))};
+        return {_object, SignalableLock(_mutex,  Traits<Object>::access(_object))};
     }
 
     /**
@@ -521,7 +567,7 @@ private:
     friend auto lockAll(F f, Guards &&... guards);
 
     EnableConditionNotification &getSignalable() {
-        return IsSignalable<Object>::access(_object);
+        return Traits<Object>::access(_object);
     }
 
     Object _object;

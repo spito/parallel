@@ -21,19 +21,19 @@ class Timer::DelayedTask : public std::enable_shared_from_this<DelayedTask> {
         {}
         virtual ~State() = default;
         virtual Request run() {
-            return {false, {}};
+            return {};
         }
-        virtual Request cancel(const std::shared_ptr<State> &) {
-            return {false, {}};
+        virtual Request cancel(state::StateChanged<State>) {
+            return {};
         }
         virtual Request done() {
-            return {false, {}};
+            return {};
         }
         virtual Request exception(std::exception_ptr) {
-            return {false, {}};
+            return {};
         }
         virtual Request restart() {
-            return {false, {}};
+            return {};
         }
 
         virtual bool isWaiting() const {
@@ -111,14 +111,14 @@ private:
     struct StateWaiting : State {
         using State::State;
         Request run() override {
-            return {true, [&]{ return std::make_shared<StateRunning>(task()); }};
+            return std::make_shared<StateRunning>(task());
         }
-        Request cancel(const std::shared_ptr<State> &) override {
-            return {true, [&]{ return std::make_shared<StateCancelled>(task()); }};
+        Request cancel(state::StateChanged<State>) override {
+            return std::make_shared<StateCancelled>(task());
         }
         Request restart() override {
             task().reschedule();
-            return {true, {}};
+            return true;
         }
 
         bool isWaiting() const override {
@@ -133,30 +133,30 @@ private:
             , _restartWanted(false)
         {}
 
-        Request cancel(const std::shared_ptr<State> &shared) override {
+        Request cancel(state::StateChanged<State> changed) override {
             if (_executor == std::this_thread::get_id()) {
-                return {true, [&]{ return std::make_shared<StateCancelled>(task()); }};
+                return std::make_shared<StateCancelled>(task());
             }
-            waitForNotification([&] { return shared.get() != this; });
-            return {false, {}};
+            waitForNotification(changed);
+            return {};
         }
 
         Request done() override {
             if (_restartWanted) {
                 if (task().start())
-                    return {true, [&]{ return std::make_shared<StateWaiting>(task()); }};
-                return {false, {}};
+                    return std::make_shared<StateWaiting>(task());
+                return {};
             }
-            return {true, [&]{ return std::make_shared<StateDone>(task()); }};
+            return std::make_shared<StateDone>(task());
         }
 
         Request exception(std::exception_ptr ptr) override {
-            return {true, [&,ptr]{ return std::make_shared<StateException>(task(), ptr); }};
+            return std::make_shared<StateException>(task(), ptr);
         }
 
-        Request restart() {
+        Request restart() override {
             _restartWanted = true;
-            return {true, {}};
+            return true;
         }
 
         bool isRunning() const override {
@@ -171,8 +171,8 @@ private:
     struct StateDone : State {
         using State::State;
 
-        Request cancel(const std::shared_ptr<State> &) override {
-            return {true, [&]{ return std::make_shared<StateCancelled>(task()); }};
+        Request cancel(state::StateChanged<State>) override {
+            return std::make_shared<StateCancelled>(task());
         }
 
         bool isDone() const override {
@@ -186,7 +186,7 @@ private:
             , _ptr(ptr)
         {}
 
-        Request cancel(const std::shared_ptr<State> &) override {
+        Request cancel(state::StateChanged<State>) override {
             std::rethrow_exception(_ptr);
         }
         Request restart() override {

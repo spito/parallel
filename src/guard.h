@@ -119,9 +119,9 @@ private:
     std::condition_variable_any _cv;
 };
 
-template<typename Object, typename = void>
+template<typename Object>
 struct Traits {
-    static constexpr const bool isNotifiable = false;
+    static constexpr const bool isNotifiable = std::is_base_of_v<EnableConditionNotification, std::remove_const_t<Object>>;
     using Handle = std::add_lvalue_reference_t<Object>;
     using Reference = std::add_lvalue_reference_t<Object>;
     using Pointer = std::add_pointer_t<Object>;
@@ -139,34 +139,8 @@ struct Traits {
 };
 
 template<typename Object>
-struct Traits<
-    Object,
-    std::enable_if_t<std::is_base_of_v<EnableConditionNotification, Object>>
-> {
-    static constexpr const bool isNotifiable = false;
-    using Handle = std::add_lvalue_reference_t<Object>;
-    using ConstHandle = std::add_const_t<Handle>;
-    using Reference = std::add_lvalue_reference_t<Object>;
-    using Pointer = std::add_pointer_t<Object>;
-    using ConstReference = std::add_const_t<Reference>;
-    using ConstPointer = std::add_const_t<Pointer>;
-
-    static Handle move(Handle handle) {
-        return handle;
-    }
-
-    template<typename H>
-    static H &access(H &object) {
-        return object;
-    }
-};
-
-template<typename Object>
-struct Traits<
-    std::shared_ptr<Object>,
-    std::enable_if_t<std::is_base_of_v<EnableConditionNotification, Object>>
-> {
-    static constexpr const bool isNotifiable = true;
+struct Traits<std::shared_ptr<Object>> {
+    static constexpr const bool isNotifiable = std::is_base_of_v<EnableConditionNotification, Object>;
     using Handle = std::shared_ptr<Object>;
     using Reference = std::add_lvalue_reference_t<Object>;
     using Pointer = std::add_pointer_t<Object>;
@@ -174,16 +148,40 @@ struct Traits<
     using ConstPointer = std::add_const_t<Pointer>;
 
     static Handle &&move(Handle &handle) {
-        return handle;
+        return std::move(handle);
     }
     static Handle &&move(Handle &&handle) {
-        return handle;
+        return std::move(handle);
     }
 
     static Reference access(Handle &object) {
         return *object;
     }
     static ConstReference access(const Handle &object) {
+        return *object;
+    }
+};
+
+template<typename Object>
+struct Traits<const std::shared_ptr<Object>> {
+    static constexpr const bool isNotifiable = std::is_base_of_v<EnableConditionNotification, Object>;
+    using Handle = std::shared_ptr<Object>;
+    using Reference = std::add_lvalue_reference_t<std::add_const_t<Object>>;
+    using Pointer = std::add_pointer_t<std::add_const_t<Object>>;
+    using ConstReference = Reference;
+    using ConstPointer = Pointer;
+
+    static Handle &&move(Handle &handle) {
+        return std::move(handle);
+    }
+    static Handle &&move(Handle &&handle) {
+        return std::move(handle);
+    }
+
+    static Reference access(Handle &object) {
+        return *object;
+    }
+    static Reference access(const Handle &object) {
         return *object;
     }
 };
@@ -216,7 +214,7 @@ struct Proxy {
      * @param lock A RAII wrapper
      */
     Proxy(Handle handle, Lock &&lock)
-        : _handle(handle)
+        : _handle(Traits<Object>::move(handle))
         , _lock(std::move(lock))
     {}
 
@@ -262,6 +260,13 @@ struct Proxy {
         return &Traits<Object>::access(_handle);
     }
 
+    template<typename Member>
+    auto operator->*(Member member) const {
+        return [=](auto &&... args) {
+            return ((**this).*member)(std::forward<decltype(args)>(args)...);
+        };
+    }
+
 private:
     Handle _handle;
     Lock _lock;
@@ -282,7 +287,7 @@ template<
     typename Mutex,
     template<typename> class WriteLockTemplate,
     template<typename> class ReadLockTemplate = WriteLockTemplate,
-    bool notSignalable = !isNotifiable<Object>
+    bool notifiable = isNotifiable<Object>
 >
 struct alignas(hardware_destructive_interference_size) Guard {
 
@@ -293,7 +298,7 @@ struct alignas(hardware_destructive_interference_size) Guard {
     using ReadLock = ReadLockTemplate<Mutex>;
 
     static_assert(!std::is_reference_v<Object>);
-    static_assert(!isNotifiable<Object>);
+    static_assert(!notifiable);
 
     /**
      * @brief Construct a new guarded @p Object
@@ -404,7 +409,7 @@ template<
     typename Mutex,
     template<typename> class LockTemplate
 >
-struct alignas(hardware_destructive_interference_size) Guard<Object, Mutex, LockTemplate, LockTemplate, false> {
+struct alignas(hardware_destructive_interference_size) Guard<Object, Mutex, LockTemplate, LockTemplate, true> {
 
     template<typename F>
     static constexpr bool isInvocable = std::is_invocable_v<F, Object &>;

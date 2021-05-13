@@ -27,14 +27,13 @@ struct BadChild : Base {
 };
 
 Base::Request Child::oops() {
-    return {true, []{ return std::make_shared<BadChild>(); }};
+    return std::make_shared<BadChild>();
 }
 Base::Request BadChild::oops() {
-    return {true, []{ return std::make_shared<Child>(); }};
+    return std::make_shared<Child>();;
 }
 
 TEST(State, basic) {
-
     parallel::state::State<Base> graal{parallel::state::Init<Child>()};
 
     EXPECT_FALSE(graal.call<&Base::foo>());
